@@ -6,6 +6,9 @@ via the MediaWiki API and stores them as UTF-8 .txt files under data/.
 
 Each file is named "<type>__<slug>.txt" so its category is recoverable
 from the filename alone (used by the chunker / vector-store builder).
+
+Pages are fetched concurrently through a small thread pool so the full
+40-page corpus comes down in a few seconds instead of ~40s sequential.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Allow running as a script: `python src/ingest.py`
@@ -26,7 +30,8 @@ WIKI_API = "https://en.wikipedia.org/w/api.php"
 # Wikipedia asks for a contact-y UA so they can reach you if you misbehave.
 USER_AGENT = "LocalWikiRAG/1.0 (student project; contact: localhost) python-urllib"
 MAX_RETRIES = 5
-BASE_BACKOFF = 2.0  # seconds; doubled per retry
+BASE_BACKOFF = 1.5  # seconds; doubled per retry
+FETCH_CONCURRENCY = 6  # well under MediaWiki's per-IP soft limit
 
 
 def slugify(name: str) -> str:
@@ -110,25 +115,26 @@ def ingest_one(title: str, kind: str) -> Path:
 
 def main() -> None:
     print(f"Ingesting into {DATA_DIR}")
+    t0 = time.time()
+    jobs = [(t, "person") for t in PEOPLE] + [(t, "place") for t in PLACES]
     failures: list[str] = []
-    for title in PEOPLE:
-        try:
-            ingest_one(title, "person")
-        except Exception as e:
-            failures.append(f"person/{title}: {e}")
-            print(f"  [FAIL] person: {title}: {e}")
-        time.sleep(1.0)  # be polite
 
-    for title in PLACES:
-        try:
-            ingest_one(title, "place")
-        except Exception as e:
-            failures.append(f"place/{title}: {e}")
-            print(f"  [FAIL] place: {title}: {e}")
-        time.sleep(1.0)
+    with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as ex:
+        futures = {ex.submit(ingest_one, title, kind): (title, kind) for title, kind in jobs}
+        for fut in as_completed(futures):
+            title, kind = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                failures.append(f"{kind}/{title}: {e}")
+                print(f"  [FAIL] {kind}: {title}: {e}")
 
+    dt = time.time() - t0
     print()
-    print(f"Done. People: {len(PEOPLE)}, Places: {len(PLACES)}, Failures: {len(failures)}")
+    print(
+        f"Done in {dt:.1f}s. People: {len(PEOPLE)}, Places: {len(PLACES)}, "
+        f"Failures: {len(failures)}"
+    )
     if failures:
         print("Failures:")
         for f in failures:

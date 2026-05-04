@@ -1,9 +1,14 @@
 """
 Build the index: read .txt files in data/, chunk, embed, store in Chroma + SQLite.
+
+Chunking (CPU-bound, very fast) runs on the main thread while embedding
+(network-bound) runs on a background worker, so the two phases overlap.
 """
 from __future__ import annotations
 
 import sys
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -52,13 +57,26 @@ def build(reset: bool = False) -> None:
     # endpoint with concurrent batches, so larger flushes => fewer round trips.
     BATCH = 256
 
-    def flush():
-        nonlocal batch_records, batch_texts
+    # One background worker so chunking on the main thread and embedding +
+    # Chroma writes on the worker overlap. We never queue more than one
+    # in-flight flush so memory stays bounded.
+    pool = ThreadPoolExecutor(max_workers=1)
+    pending: Future | None = None
+    t_start = time.time()
+
+    def _do_flush(records: list[dict], texts: list[str]) -> None:
+        embs = embedder.embed_many(texts)
+        vectorstore.add_chunks(records, embs)
+
+    def schedule_flush() -> None:
+        nonlocal batch_records, batch_texts, pending
         if not batch_records:
             return
-        embs = embedder.embed_many(batch_texts)
-        vectorstore.add_chunks(batch_records, embs)
+        if pending is not None:
+            pending.result()  # back-pressure: wait for previous flush
+        recs, txts = batch_records, batch_texts
         batch_records, batch_texts = [], []
+        pending = pool.submit(_do_flush, recs, txts)
 
     for path in files:
         title, kind, body = _parse_doc(path)
@@ -80,11 +98,15 @@ def build(reset: bool = False) -> None:
             batch_texts.append(ch.text)
             total_chunks += 1
             if len(batch_records) >= BATCH:
-                flush()
-    flush()
+                schedule_flush()
+    schedule_flush()
+    if pending is not None:
+        pending.result()
+    pool.shutdown(wait=True)
 
+    dt = time.time() - t_start
     print()
-    print(f"Indexed {total_chunks} chunks across {len(files)} documents.")
+    print(f"Indexed {total_chunks} chunks across {len(files)} documents in {dt:.1f}s.")
     print("Stats:", vectorstore.stats())
 
 
