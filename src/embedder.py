@@ -12,9 +12,18 @@ import json
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import Iterator, List
 
-from config import EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_MODEL, LLM_MODEL, OLLAMA_HOST
+from config import (
+    EMBED_BATCH_SIZE,
+    EMBED_CONCURRENCY,
+    EMBED_MODEL,
+    LLM_MODEL,
+    LLM_NUM_CTX,
+    LLM_NUM_PREDICT,
+    OLLAMA_HOST,
+    OLLAMA_KEEP_ALIVE,
+)
 
 
 class OllamaError(RuntimeError):
@@ -38,7 +47,10 @@ def _post(path: str, payload: dict, timeout: int = 120) -> dict:
 
 
 def embed(text: str, model: str = EMBED_MODEL) -> List[float]:
-    res = _post("/api/embeddings", {"model": model, "prompt": text})
+    res = _post(
+        "/api/embeddings",
+        {"model": model, "prompt": text, "keep_alive": OLLAMA_KEEP_ALIVE},
+    )
     emb = res.get("embedding")
     if not emb:
         raise OllamaError(f"No embedding returned (model={model}). Response: {res}")
@@ -49,7 +61,11 @@ def _embed_batch(texts: List[str], model: str) -> List[List[float]]:
     """Call Ollama's batch embed endpoint (`/api/embed`) once for a list of texts."""
     if not texts:
         return []
-    res = _post("/api/embed", {"model": model, "input": texts}, timeout=300)
+    res = _post(
+        "/api/embed",
+        {"model": model, "input": texts, "keep_alive": OLLAMA_KEEP_ALIVE},
+        timeout=300,
+    )
     embs = res.get("embeddings")
     if not embs or len(embs) != len(texts):
         # Fallback to legacy single-text endpoint if the server is older.
@@ -89,11 +105,62 @@ def generate(prompt: str, model: str = LLM_MODEL, temperature: float = 0.2) -> s
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": temperature},
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": temperature,
+                "num_predict": LLM_NUM_PREDICT,
+                "num_ctx": LLM_NUM_CTX,
+            },
         },
         timeout=300,
     )
     return res.get("response", "").strip()
+
+
+def generate_stream(
+    prompt: str,
+    model: str = LLM_MODEL,
+    temperature: float = 0.2,
+) -> Iterator[str]:
+    """Yield response tokens as they are produced by Ollama.
+
+    Uses the same /api/generate endpoint with stream=True; each line of the
+    response body is a JSON object with a "response" field (token chunk).
+    """
+    url = f"{OLLAMA_HOST}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": True,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": temperature,
+            "num_predict": LLM_NUM_PREDICT,
+            "num_ctx": LLM_NUM_CTX,
+        },
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            for raw_line in resp:
+                if not raw_line:
+                    continue
+                try:
+                    obj = json.loads(raw_line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                tok = obj.get("response")
+                if tok:
+                    yield tok
+                if obj.get("done"):
+                    break
+    except urllib.error.URLError as e:
+        raise OllamaError(
+            f"Cannot reach Ollama at {OLLAMA_HOST}. Detail: {e}"
+        ) from e
 
 
 def ping() -> bool:

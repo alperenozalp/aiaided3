@@ -51,28 +51,41 @@ def _connect() -> sqlite3.Connection:
 
 # ---------- Chroma ----------
 
+_CLIENT: Optional["chromadb.api.ClientAPI"] = None
+_COLLECTION = None
+
+
 def _client() -> chromadb.api.ClientAPI:
-    return chromadb.PersistentClient(
-        path=str(CHROMA_DIR),
-        settings=Settings(anonymized_telemetry=False, allow_reset=True),
-    )
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = chromadb.PersistentClient(
+            path=str(CHROMA_DIR),
+            settings=Settings(anonymized_telemetry=False, allow_reset=True),
+        )
+    return _CLIENT
 
 
 def get_collection():
-    return _client().get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
+    global _COLLECTION
+    if _COLLECTION is None:
+        _COLLECTION = _client().get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return _COLLECTION
 
 
 def reset() -> None:
     """Wipe Chroma collection AND SQLite mirror."""
+    global _COLLECTION
     c = _client()
     try:
         c.delete_collection(COLLECTION_NAME)
     except Exception:
         pass
-    c.get_or_create_collection(name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
+    _COLLECTION = c.get_or_create_collection(
+        name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+    )
     if Path(SQLITE_PATH).exists():
         Path(SQLITE_PATH).unlink()
 

@@ -36,6 +36,17 @@ EMBED_CONCURRENCY = 8
 TOP_K = 5
 COLLECTION_NAME = "wiki_rag"
 
+# --- LLM generation ---
+# keep_alive tells Ollama to keep the model resident in RAM between calls.
+# "30m" avoids the multi-second cold-start on every question.
+OLLAMA_KEEP_ALIVE = "30m"
+# Cap the answer length. Most factual answers fit in 256 tokens; this stops
+# the model from rambling and shaves seconds off generation time.
+LLM_NUM_PREDICT = 256
+# Context window. With TOP_K=5 chunks ~ 1400 chars each + prompt overhead,
+# 4096 is plenty. Larger windows slow down generation on CPU.
+LLM_NUM_CTX = 4096
+
 # --- Entities to ingest (Wikipedia page titles) ---
 PEOPLE = [
     "Albert Einstein",

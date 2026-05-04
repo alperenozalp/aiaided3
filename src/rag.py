@@ -4,7 +4,7 @@ End-to-end RAG pipeline: route -> embed query -> retrieve -> generate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 from config import TOP_K
 from src import embedder, vectorstore
@@ -86,3 +86,27 @@ def answer(question: str, top_k: int = TOP_K, show_sources: bool = True) -> RAGR
             "total": int((t4 - t0) * 1000),
         },
     )
+
+
+def retrieve(question: str, top_k: int = TOP_K) -> Tuple[Route, List[dict]]:
+    """Run routing + retrieval only. Useful for streaming UIs that want to
+    show sources before generation finishes."""
+    r = route(question)
+    q_emb = embedder.embed(question)
+    if set(r.types) == {"person", "place"}:
+        half = max(2, top_k // 2)
+        person_hits = vectorstore.query(q_emb, types=["person"], top_k=half)
+        place_hits = vectorstore.query(q_emb, types=["place"], top_k=half)
+        merged = sorted(person_hits + place_hits, key=lambda x: x["distance"] or 1e9)
+        contexts = merged[:top_k]
+    else:
+        contexts = vectorstore.query(q_emb, types=r.types, top_k=top_k)
+    return r, contexts
+
+
+def answer_stream(
+    question: str, contexts: List[dict]
+) -> Iterator[str]:
+    """Yield answer tokens for a question given pre-retrieved contexts."""
+    prompt = _build_prompt(question, contexts)
+    yield from embedder.generate_stream(prompt)

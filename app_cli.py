@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src import embedder, vectorstore
-from src.rag import answer
+from src.rag import answer_stream, retrieve
 
 
 HELP = """Commands:
@@ -84,17 +84,33 @@ def main() -> None:
             continue
 
         try:
-            res = answer(q, top_k=top_k, show_sources=show_sources)
+            import sys as _sys
+            import time as _time
+
+            t0 = _time.time()
+            r, contexts = retrieve(q, top_k=top_k)
+            t1 = _time.time()
+            print("\nbot > ", end="", flush=True)
+            chunks: list[str] = []
+            for tok in answer_stream(q, contexts):
+                chunks.append(tok)
+                _sys.stdout.write(tok)
+                _sys.stdout.flush()
+            text = "".join(chunks).strip() or "I don't know based on the available data."
+            t2 = _time.time()
+            print("\n")
         except Exception as e:
             print(f"  [error] {e}")
             continue
 
-        print(f"\nbot > {res.answer}\n")
-        print(f"  route: {res.route.types}  ({res.route.reason})")
-        print(f"  latency_ms: {res.latency_ms}")
-        if show_sources and res.contexts:
+        print(f"  route: {r.types}  ({r.reason})")
+        print(
+            f"  latency_ms: retrieve={int((t1 - t0) * 1000)} "
+            f"generate={int((t2 - t1) * 1000)} total={int((t2 - t0) * 1000)}"
+        )
+        if show_sources and contexts:
             print("  sources:")
-            for i, c in enumerate(res.contexts, 1):
+            for i, c in enumerate(contexts, 1):
                 snippet = c["text"][:140].replace("\n", " ")
                 print(f"    [{i}] {c['type']} - {c['title']}  d={c['distance']:.3f}")
                 print(f"        {snippet}...")

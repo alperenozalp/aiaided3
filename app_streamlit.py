@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import streamlit as st
 
 from src import embedder, vectorstore
-from src.rag import answer
+from src.rag import answer_stream, retrieve
 
 st.set_page_config(page_title="Local Wiki RAG", page_icon="📚", layout="wide")
 st.title("📚 Local Wikipedia RAG Assistant")
@@ -67,27 +67,43 @@ for msg in st.session_state["history"]:
 
 q = st.chat_input("Ask about a famous person or place…")
 if q:
+    import time
+
     st.session_state["history"].append({"role": "user", "content": q})
     with st.chat_message("user"):
         st.markdown(q)
     with st.chat_message("assistant"):
-        with st.spinner("Retrieving and generating…"):
-            try:
-                res = answer(q, top_k=top_k, show_sources=show_sources)
-            except Exception as e:
-                st.error(str(e))
-                st.stop()
-        st.markdown(res.answer)
+        # 1) Retrieve (fast) — show spinner only for this brief phase.
+        t0 = time.time()
+        try:
+            with st.spinner("Retrieving…"):
+                r, contexts = retrieve(q, top_k=top_k)
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+        t1 = time.time()
+
+        # 2) Stream the answer token-by-token so the user sees output
+        # immediately instead of waiting for the full response.
+        try:
+            answer_text = st.write_stream(answer_stream(q, contexts))
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+        t2 = time.time()
+
+        if not (answer_text or "").strip():
+            answer_text = "I don't know based on the available data."
+
         meta = (
-            f"route: {res.route.types} · "
-            f"latency: {res.latency_ms['total']} ms "
-            f"(embed {res.latency_ms['embed']} / retrieve {res.latency_ms['retrieve']} / "
-            f"generate {res.latency_ms['generate']})"
+            f"route: {r.types} · "
+            f"latency: {int((t2 - t0) * 1000)} ms "
+            f"(retrieve {int((t1 - t0) * 1000)} / generate {int((t2 - t1) * 1000)})"
         )
         st.caption(meta)
-        if show_sources and res.contexts:
+        if show_sources and contexts:
             with st.expander("Sources"):
-                for i, c in enumerate(res.contexts, 1):
+                for i, c in enumerate(contexts, 1):
                     st.markdown(
                         f"**[{i}] {c['type']} — {c['title']}**  _(distance={c['distance']:.3f})_"
                     )
@@ -95,8 +111,8 @@ if q:
         st.session_state["history"].append(
             {
                 "role": "assistant",
-                "content": res.answer,
-                "sources": res.contexts if show_sources else [],
+                "content": answer_text,
+                "sources": contexts if show_sources else [],
                 "meta": meta,
             }
         )
