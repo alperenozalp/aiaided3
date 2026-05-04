@@ -48,7 +48,9 @@ def build(reset: bool = False) -> None:
     total_chunks = 0
     batch_records: list[dict] = []
     batch_texts: list[str] = []
-    BATCH = 32
+    # Bigger flush window: embed_many now uses Ollama's /api/embed batch
+    # endpoint with concurrent batches, so larger flushes => fewer round trips.
+    BATCH = 256
 
     def flush():
         nonlocal batch_records, batch_texts

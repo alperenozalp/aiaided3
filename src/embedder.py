@@ -14,7 +14,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
-from config import EMBED_CONCURRENCY, EMBED_MODEL, LLM_MODEL, OLLAMA_HOST
+from config import EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_MODEL, LLM_MODEL, OLLAMA_HOST
 
 
 class OllamaError(RuntimeError):
@@ -45,19 +45,41 @@ def embed(text: str, model: str = EMBED_MODEL) -> List[float]:
     return emb
 
 
+def _embed_batch(texts: List[str], model: str) -> List[List[float]]:
+    """Call Ollama's batch embed endpoint (`/api/embed`) once for a list of texts."""
+    if not texts:
+        return []
+    res = _post("/api/embed", {"model": model, "input": texts}, timeout=300)
+    embs = res.get("embeddings")
+    if not embs or len(embs) != len(texts):
+        # Fallback to legacy single-text endpoint if the server is older.
+        return [embed(t, model=model) for t in texts]
+    return embs
+
+
 def embed_many(
     texts: List[str],
     model: str = EMBED_MODEL,
     concurrency: int = EMBED_CONCURRENCY,
+    batch_size: int = EMBED_BATCH_SIZE,
 ) -> List[List[float]]:
-    """Embed a batch of texts in parallel HTTP calls.
+    """Embed many texts using Ollama's batch endpoint, with concurrent batches.
 
-    Order is preserved. concurrency=1 falls back to sequential.
+    Order is preserved.
     """
-    if concurrency <= 1 or len(texts) <= 1:
-        return [embed(t, model=model) for t in texts]
+    if not texts:
+        return []
+    if len(texts) <= batch_size or concurrency <= 1:
+        return _embed_batch(texts, model)
+
+    # Split into batches and run them concurrently.
+    batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        return list(ex.map(lambda t: embed(t, model=model), texts))
+        results = list(ex.map(lambda b: _embed_batch(b, model), batches))
+    out: List[List[float]] = []
+    for r in results:
+        out.extend(r)
+    return out
 
 
 def generate(prompt: str, model: str = LLM_MODEL, temperature: float = 0.2) -> str:

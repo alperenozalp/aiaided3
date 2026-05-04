@@ -18,17 +18,19 @@ EMBED_MODEL = "nomic-embed-text"
 LLM_MODEL = "llama3.2:3b"
 
 # --- Chunking ---
-# Larger chunks (1000 chars, ~200 tokens) cut indexing time on CPU and give
-# the LLM more coherent context per retrieved snippet. The 200-char overlap
-# keeps facts that span chunk boundaries findable.
-CHUNK_SIZE = 1000         # characters
-CHUNK_OVERLAP = 200       # characters
+# Larger chunks (1400 chars, ~280 tokens) cut indexing time substantially on
+# CPU (fewer embeddings to compute) and give the LLM more coherent context
+# per retrieved snippet. The 150-char overlap keeps facts that span chunk
+# boundaries findable.
+CHUNK_SIZE = 1400         # characters
+CHUNK_OVERLAP = 150       # characters
 
-# --- Embedding (parallelism) ---
-# nomic-embed-text on Ollama serializes per-process internally, but issuing
-# requests concurrently still overlaps tokenization, JSON encoding and HTTP,
-# giving ~2-3x speedup on multi-core CPUs.
-EMBED_CONCURRENCY = 4
+# --- Embedding (parallelism + batching) ---
+# We use Ollama's batch endpoint /api/embed (input=list) which embeds many
+# texts in one HTTP call, eliminating most per-request overhead. On top of
+# that we still issue a few batches concurrently to overlap I/O.
+EMBED_BATCH_SIZE = 32
+EMBED_CONCURRENCY = 8
 
 # --- Retrieval ---
 TOP_K = 5
