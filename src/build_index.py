@@ -51,11 +51,14 @@ def build(reset: bool = False) -> None:
         return
 
     total_chunks = 0
+    flushed_chunks = 0
     batch_records: list[dict] = []
     batch_texts: list[str] = []
-    # Bigger flush window: embed_many now uses Ollama's /api/embed batch
-    # endpoint with concurrent batches, so larger flushes => fewer round trips.
-    BATCH = 256
+    # Smaller flush window => earlier first feedback and more overlap between
+    # chunking on the main thread and embedding on the worker. embed_many
+    # already parallelises with EMBED_CONCURRENCY internally, so 96 chunks per
+    # flush still saturates the embedding service.
+    BATCH = 96
 
     # One background worker so chunking on the main thread and embedding +
     # Chroma writes on the worker overlap. We never queue more than one
@@ -64,45 +67,69 @@ def build(reset: bool = False) -> None:
     pending: Future | None = None
     t_start = time.time()
 
-    def _do_flush(records: list[dict], texts: list[str]) -> None:
+    def _do_flush(records: list[dict], texts: list[str]) -> int:
+        t0 = time.time()
         embs = embedder.embed_many(texts)
+        t1 = time.time()
+        print(f"      [chroma] writing {len(records)} vectors...", flush=True)
         vectorstore.add_chunks(records, embs)
+        t2 = time.time()
+        print(
+            f"      [chroma] wrote {len(records)} vectors in {(t2 - t1) * 1000:.0f} ms "
+            f"(embed {(t1 - t0):.1f}s)",
+            flush=True,
+        )
+        return int((time.time() - t0) * 1000)
 
     def schedule_flush() -> None:
-        nonlocal batch_records, batch_texts, pending
+        nonlocal batch_records, batch_texts, pending, flushed_chunks
         if not batch_records:
             return
         if pending is not None:
-            pending.result()  # back-pressure: wait for previous flush
+            ms = pending.result()  # back-pressure: wait for previous flush
+            print(f"    [embed] flushed previous batch in {ms} ms", flush=True)
         recs, txts = batch_records, batch_texts
         batch_records, batch_texts = [], []
+        flushed_chunks += len(recs)
+        print(
+            f"    [embed] sending {len(recs)} chunks ({flushed_chunks}/{total_chunks} so far)...",
+            flush=True,
+        )
         pending = pool.submit(_do_flush, recs, txts)
 
-    for path in files:
-        title, kind, body = _parse_doc(path)
-        doc_id = path.stem
-        chunks = chunk_text(body)
-        print(f"  {kind:6s} {title:35s} -> {len(chunks):3d} chunks")
-        for ch in chunks:
-            cid = f"{doc_id}::{ch.index}"
-            batch_records.append(
-                {
-                    "id": cid,
-                    "doc_id": doc_id,
-                    "title": title,
-                    "type": kind,
-                    "chunk_index": ch.index,
-                    "text": ch.text,
-                }
-            )
-            batch_texts.append(ch.text)
-            total_chunks += 1
-            if len(batch_records) >= BATCH:
-                schedule_flush()
-    schedule_flush()
-    if pending is not None:
-        pending.result()
-    pool.shutdown(wait=True)
+    try:
+        for path in files:
+            title, kind, body = _parse_doc(path)
+            doc_id = path.stem
+            chunks = chunk_text(body)
+            print(f"  {kind:6s} {title:35s} -> {len(chunks):3d} chunks", flush=True)
+            for ch in chunks:
+                cid = f"{doc_id}::{ch.index}"
+                batch_records.append(
+                    {
+                        "id": cid,
+                        "doc_id": doc_id,
+                        "title": title,
+                        "type": kind,
+                        "chunk_index": ch.index,
+                        "text": ch.text,
+                    }
+                )
+                batch_texts.append(ch.text)
+                total_chunks += 1
+                if len(batch_records) >= BATCH:
+                    schedule_flush()
+        schedule_flush()
+        if pending is not None:
+            ms = pending.result()
+            print(f"    [embed] flushed final batch in {ms} ms", flush=True)
+        pool.shutdown(wait=True)
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted. Cancelling background embed and exiting...", flush=True)
+        if pending is not None:
+            pending.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise SystemExit(130)
 
     dt = time.time() - t_start
     print()

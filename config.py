@@ -27,10 +27,11 @@ CHUNK_OVERLAP = 150       # characters
 
 # --- Embedding (parallelism + batching) ---
 # We use Ollama's batch endpoint /api/embed (input=list) which embeds many
-# texts in one HTTP call, eliminating most per-request overhead. On top of
-# that we still issue a few batches concurrently to overlap I/O.
-EMBED_BATCH_SIZE = 32
-EMBED_CONCURRENCY = 8
+# texts in one HTTP call, eliminating most per-request overhead. On CPU,
+# concurrency >2 actually slows Ollama down (it serialises internally and
+# the extra threads just compete for the GIL / HTTP buffers).
+EMBED_BATCH_SIZE = 16
+EMBED_CONCURRENCY = 2
 
 # --- Retrieval ---
 TOP_K = 5

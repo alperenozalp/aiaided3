@@ -61,11 +61,15 @@ def _embed_batch(texts: List[str], model: str) -> List[List[float]]:
     """Call Ollama's batch embed endpoint (`/api/embed`) once for a list of texts."""
     if not texts:
         return []
+    import time
+    t0 = time.time()
     res = _post(
         "/api/embed",
         {"model": model, "input": texts, "keep_alive": OLLAMA_KEEP_ALIVE},
         timeout=300,
     )
+    dt = time.time() - t0
+    print(f"      [ollama] embedded {len(texts)} chunks in {dt:.1f}s", flush=True)
     embs = res.get("embeddings")
     if not embs or len(embs) != len(texts):
         # Fallback to legacy single-text endpoint if the server is older.
